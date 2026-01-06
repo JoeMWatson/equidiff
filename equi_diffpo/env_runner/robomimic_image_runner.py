@@ -87,6 +87,7 @@ class RobomimicImageRunner(BaseImageRunner):
             rotation_transformer = RotationTransformer('axis_angle', 'rotation_6d')
 
         def env_fn():
+            print(env_meta)
             robomimic_env = create_env(
                 env_meta=env_meta, 
                 shape_meta=shape_meta
@@ -215,7 +216,8 @@ class RobomimicImageRunner(BaseImageRunner):
             env_prefixs.append('test/')
             env_init_fn_dills.append(dill.dumps(init_fn))
 
-        env = AsyncVectorEnv(env_fns, dummy_env_fn=dummy_env_fn)
+        # env = AsyncVectorEnv(env_fns, dummy_env_fn=dummy_env_fn)
+        env = SyncVectorEnv(env_fns)
 
         self.env_meta = env_meta
         self.env = env
@@ -264,18 +266,19 @@ class RobomimicImageRunner(BaseImageRunner):
             assert len(this_init_fns) == n_envs
 
             # init envs
+            print("start init envs")
             env.call_each('run_dill_function', 
                 args_list=[(x,) for x in this_init_fns])
-
-            # start rollout
+            print("start env.reset()")
             obs = env.reset()
             past_action = None
+            print("start policy.reset()")
             policy.reset()
 
             env_name = self.env_meta['env_name']
             pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval {env_name}Image {chunk_idx+1}/{n_chunks}", 
                 leave=False, mininterval=self.tqdm_interval_sec)
-            
+            print("start while not done:")
             done = False
             while not done:
                 # create obs dict
@@ -291,6 +294,7 @@ class RobomimicImageRunner(BaseImageRunner):
                         device=device))
 
                 # run policy
+                print("start policy.predict_action")
                 with torch.no_grad():
                     action_dict = policy.predict_action(obs_dict)
 
@@ -308,6 +312,7 @@ class RobomimicImageRunner(BaseImageRunner):
                 if self.abs_action:
                     env_action = self.undo_transform_action(action)
 
+                print("start env.step(env_action)")
                 obs, reward, done, info = env.step(env_action)
                 done = np.all(done)
                 past_action = action
@@ -315,7 +320,7 @@ class RobomimicImageRunner(BaseImageRunner):
                 # update pbar
                 pbar.update(action.shape[1])
             pbar.close()
-
+            print("done")
             # collect data for this round
             all_video_paths[this_global_slice] = env.render()[this_local_slice]
             all_rewards[this_global_slice] = env.call('get_attr', 'reward')[this_local_slice]

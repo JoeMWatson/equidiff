@@ -7,8 +7,8 @@ Added render method.
 import os
 import numpy as np
 import multiprocessing as mp
-if os.getenv("MUJOCO_GL") != "osmesa":
-    mp.set_start_method('spawn', force=True)
+# if os.getenv("MUJOCO_GL") != "osmesa":
+#     mp.set_start_method('spawn', force=True)
 import time
 import sys
 from enum import Enum
@@ -142,6 +142,19 @@ class AsyncVectorEnv(VectorEnv):
         self.error_queue = ctx.Queue()
         target = _worker_shared_memory if self.shared_memory else _worker
         target = worker or target
+
+        # # run outside of loop to get errors
+        # parent_pipe, child_pipe = ctx.Pipe()
+        # target(0, CloudpickleWrapper(self.env_fns[0]), child_pipe, parent_pipe, _obs_buffer, self.error_queue)
+
+        # print("async debug")
+        # env_fn = self.env_fns[0]
+        # _env = env_fn()
+        # print(_env.reset() is not None)
+        # _env = CloudpickleWrapper(env_fn)()
+        # print(_env.reset() is not None)
+        # print("passed")
+
         with clear_mpi_env_vars():
             for idx, env_fn in enumerate(self.env_fns):
                 parent_pipe, child_pipe = ctx.Pipe()
@@ -164,6 +177,17 @@ class AsyncVectorEnv(VectorEnv):
                 process.daemon = daemon
                 process.start()
                 child_pipe.close()
+
+        # Check for initialization errors
+        time.sleep(0.5)  # Give processes time to initialize
+        if not self.error_queue.empty():
+            num_errors = self.error_queue.qsize()
+            for _ in range(num_errors):
+                index, exctype, value = self.error_queue.get()
+                logger.error(
+                    f"Worker-{index} failed to initialize: {exctype.__name__}: {value}"
+                )
+            raise RuntimeError(f"{num_errors} worker(s) failed to initialize")
 
         self._state = AsyncState.DEFAULT
         self._check_observation_spaces()
@@ -562,15 +586,30 @@ class AsyncVectorEnv(VectorEnv):
 
 
 def _worker(index, env_fn, pipe, parent_pipe, shared_memory, error_queue):
+    print("worker", index)
     assert shared_memory is None
-    env = env_fn()
     parent_pipe.close()
     try:
+        env = env_fn()
+    except (KeyboardInterrupt, Exception):
+        error_queue.put((index,) + sys.exc_info()[:2])
+        pipe.send((None, False))
+        return  # Exit worker immediately
+
+    try:
+        print("worker loop", index)
         while True:
             command, data = pipe.recv()
             if command == "reset":
-                observation = env.reset()
-                pipe.send((observation, True))
+                print("_worker if command == reset", index)
+                try:
+                    observation = env.reset()
+                    print("reset success", observation.keys(), index)
+                    pipe.send((observation, True))
+                    print("pipe sent", index)
+                except (KeyboardInterrupt, Exception) as e:
+                    print(e)
+                    raise
             elif command == "step":
                 observation, reward, done, info = env.step(data)
                 # if done:
@@ -623,11 +662,17 @@ def _worker_shared_memory(index, env_fn, pipe, parent_pipe, shared_memory, error
         while True:
             command, data = pipe.recv()
             if command == "reset":
-                observation = env.reset()
-                write_to_shared_memory(
-                    index, observation, shared_memory, observation_space
-                )
-                pipe.send((None, True))
+                print("_worker_shared_memory reset", index)
+                try:
+                    observation = env.reset()
+                    print("env.reset()", index)
+                    write_to_shared_memory(
+                        index, observation, shared_memory, observation_space
+                    )
+                    pipe.send((None, True))
+                except Exception as e:
+                    print(e)
+                    raise
             elif command == "step":
                 observation, reward, done, info = env.step(data)
                 # if done:

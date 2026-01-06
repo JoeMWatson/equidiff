@@ -19,7 +19,7 @@ class RobomimicAbsoluteActionConverter:
         # read config to set up metadata for observation modalities (e.g. detecting rgb observations)
         # must ran before create dataset
         ObsUtils.initialize_obs_utils_with_config(config)
-
+        print(dataset_path)
         env_meta = FileUtils.get_env_metadata_from_dataset(dataset_path)
         abs_env_meta = copy.deepcopy(env_meta)
         abs_env_meta['env_kwargs']['controller_configs']['control_delta'] = False

@@ -206,17 +206,23 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
 
+                print("running eval")
+
                 # ========= eval for this epoch ==========
                 policy = self.model
                 if cfg.training.use_ema:
                     policy = self.ema_model
                 policy.eval()
 
+                print("running rollout")
+
                 # run rollout
                 if (self.epoch % cfg.training.rollout_every) == 0:
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
+
+                print("running validation")
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
@@ -236,6 +242,8 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
                             # log epoch average validation loss
                             step_log['val_loss'] = val_loss
 
+                print("running diffusion")
+
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
                     with torch.no_grad():
@@ -254,7 +262,9 @@ class TrainDiffusionUnetHybridWorkspace(BaseWorkspace):
                         del result
                         del pred_action
                         del mse
-                
+
+                print("running checkpoint")
+
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
                     # checkpointing
