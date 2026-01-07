@@ -1,0 +1,168 @@
+Bootstrap: docker
+From: nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+%post
+    # Update and install system dependencies
+    DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update && apt-get install -y \
+        git \
+        python3 \
+        python3-venv \
+        python3-dev \
+        python3-pip \
+        pkg-config \
+        build-essential \
+        cmake \
+        wget \
+        curl \
+        ffmpeg \
+        gfortran \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        libgomp1 \
+        libavcodec-dev \
+        libavformat-dev \
+        libavutil-dev \
+        libswscale-dev \
+        libavdevice-dev \
+        software-properties-common \
+        && rm -rf /var/lib/apt/lists/*
+    
+     add-apt-repository -y universe
+     add-apt-repository ppa:ubuntuhandbook1/ffmpeg7
+     apt-cache search libavcodec-dev
+     apt-cache policy ffmpeg	
+     apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+     #apt-get update && apt-get install -y \
+     #		libavformat-dev libavcodec-dev libavdevice-dev \
+     #		libavutil-dev libswscale-dev libswresample-dev libavfilter-dev \ 
+     #   	&& rm -rf /var/lib/apt/lists/*
+
+    # Create a virtual environment (Python 3.10 is default on Ubuntu 22.04)
+    python3 -m venv /opt/venv
+    
+    # Activate virtual environment
+    . /opt/venv/bin/activate 
+   
+    # Upgrade pip with compatible setuptools version for gym
+    pip install --no-cache-dir --upgrade pip==22.2.2 setuptools==65.5.0 wheel 
+    
+    # Install core dependencies
+    pip install --no-cache-dir \
+        numpy==1.23.3 \
+        numba==0.56.4 \
+        scipy==1.9.1 \
+        opencv-python==4.6.0.66 \
+        cffi==1.15.1 \
+        ipykernel==6.16.0 \
+        matplotlib==3.6.1 \
+        zarr==2.12.0 \
+        numcodecs==0.10.2 \
+        h5py==3.7.0 \
+        hydra-core==1.2.0 \
+        einops==0.4.1 \
+        tqdm==4.64.1 \
+        dill==0.3.5.1 \
+        scikit-video==1.1.11 \
+        scikit-image==0.19.3 \
+        pymunk==6.2.1 \
+        threadpoolctl==3.1.0 \
+        shapely==1.8.4 \
+        Cython==0.29.32 \
+        imageio==2.22.0 \
+        imageio-ffmpeg==0.4.7 \
+        termcolor==2.0.1 \
+        tensorboard==2.10.1 \
+        tensorboardX==2.5.1 \
+        psutil==5.9.2 \
+        click==8.0.4 \
+        boto3==1.24.96 \
+        accelerate==0.13.2 \
+        datasets==2.6.1 \
+        diffusers==0.11.1 \
+        imagecodecs==2022.9.26 \
+        open3d \
+        wandb==0.17.0 \
+        pygame
+
+    pip install --no-cache-dir "av>=11.0.0"
+    
+    # Install gym separately with setuptools workaround
+    pip install --no-cache-dir gym==0.21.0
+    
+    # Install PyTorch with CUDA 11.8 support
+    pip install --no-cache-dir torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 \
+        --index-url https://download.pytorch.org/whl/cu118
+
+    # Install pytorch3d
+    pip install --no-cache-dir "git+https://github.com/facebookresearch/pytorch3d.git@v0.7.5"
+
+    # Install GitHub dependencies
+    pip install --no-cache-dir \
+        "escnn @ https://github.com/pointW/escnn/archive/fc4714cb6dc0d2a32f9fcea35771968b89911109.tar.gz" \
+        "robosuite @ https://github.com/ARISE-Initiative/robosuite/archive/b9d8d3de5e3dfd1724f4a0e6555246c460407daa.tar.gz" \
+        "robomimic @ https://github.com/pointW/robomimic/archive/8aad5b3caaaac9289b1504438a7f5d3a76d06c07.tar.gz" \
+        "robosuite-task-zoo @ https://github.com/pointW/robosuite-task-zoo/archive/0f8a7b2fa5d192e4e8800bebfe8090b28926f3ed.tar.gz"
+    
+    # Create a directory for repositories
+    mkdir -p /opt/repos
+
+%environment
+    # Activate the virtual environment
+    export VIRTUAL_ENV="/opt/venv"
+    export PATH="/opt/venv/bin:$PATH"
+    export PYTHONPATH="/opt/repos:$PYTHONPATH"
+    
+    # CUDA environment variables
+    export CUDA_HOME=/usr/local/cuda
+    export PATH=${CUDA_HOME}/bin:${PATH}
+    export LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+%runscript
+    echo "Container for equidiff"
+    echo "Python version: $(python --version)"
+    echo "PyTorch version: $(python -c 'import torch; print(torch.__version__)')"
+    echo "CUDA available: $(python -c 'import torch; print(torch.cuda.is_available())')"
+    echo ""
+    echo "Repositories located at: /opt/repos"
+    exec /bin/bash "$@"
+
+%labels
+    Author joe@joe-renyi
+    Version v1.0-py310
+    Description Ubuntu 22.04 with CUDA 11.8 for equidiff project (Python 3.10)
+    CUDA 11.8.0
+    Python 3.10
+    PyTorch 2.1.0
+
+%help
+    This container includes:
+    - Ubuntu 22.04 base with CUDA 11.8 and cuDNN 8
+    - Python 3.10 (system default) with virtual environment
+    - PyTorch 2.1.0 with CUDA 11.8 support
+    - PyTorch3D 0.7.5
+    - All equidiff dependencies including:
+      * Robotics libraries (robosuite, robomimic)
+      * ML libraries (diffusers, accelerate, wandb)
+      * Vision libraries (opencv, open3d, imagecodecs)
+      * Scientific computing (numpy, scipy, numba)
+    
+    Note: This uses Python 3.10 instead of 3.9 for better compatibility
+    with Ubuntu 22.04. All dependencies are compatible with Python 3.10.
+    
+    To build:
+        apptainer build equidiff.sif equidiff-py310.def
+    
+    To run interactively:
+        apptainer shell --nv equidiff.sif
+    
+    To run with GPU support:
+        apptainer exec --nv equidiff.sif python your_script.py
+    
+    To mount your code directory:
+        apptainer shell --nv --bind /path/to/equidiff:/workspace equidiff.sif
+    
+    Note: Use --nv flag to enable NVIDIA GPU support
+
