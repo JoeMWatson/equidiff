@@ -173,8 +173,8 @@ def collect_trajectory(demo_idx: int) -> dict:
     action_left_pos = data["left_ee_pos"][1:, :]
     # mujoco is w x y z
     action_left_ori = Rotation.from_quat(data["left_ee_quat"][1:, [1, 2, 3, 0]]).as_rotvec()
-    action_right_pos = data["left_ee_pos"][1:, :]
-    action_right_ori = Rotation.from_quat(data["left_ee_quat"][1:, [1, 2, 3, 0]]).as_rotvec()
+    action_right_pos = data["right_ee_pos"][1:, :]
+    action_right_ori = Rotation.from_quat(data["right_ee_quat"][1:, [1, 2, 3, 0]]).as_rotvec()
     actions = np.concatenate((
         action_left_pos, action_left_ori, action_left_gripper, action_right_pos, action_right_ori, action_right_gripper
     ), axis=1)

@@ -31,6 +31,8 @@ max_steps = {
     'can': 400,
     'lift': 400,
     'square': 400,
+    # bimanual tasks
+    'bimanual_three_cubes': 700,
 }
 
 def get_ws_x_center(task_name):
