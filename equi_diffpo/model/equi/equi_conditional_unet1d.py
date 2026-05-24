@@ -6,7 +6,7 @@ from einops import rearrange, repeat
 from equi_diffpo.model.diffusion.conditional_unet1d import ConditionalUnet1D
 
 class EquiDiffusionUNet(torch.nn.Module):
-    def __init__(self, act_emb_dim, local_cond_dim, global_cond_dim, diffusion_step_embed_dim, down_dims, kernel_size, n_groups, cond_predict_scale, N):
+    def __init__(self, act_emb_dim, local_cond_dim, global_cond_dim, diffusion_step_embed_dim, down_dims, kernel_size, n_groups, cond_predict_scale, N, bimanual=False):
         super().__init__()
         self.unet = ConditionalUnet1D(
             input_dim=act_emb_dim,
@@ -21,15 +21,22 @@ class EquiDiffusionUNet(torch.nn.Module):
         self.N = N
         self.group = gspaces.no_base_space(CyclicGroup(self.N))
         self.order = self.N
+        self.bimanual = bimanual
         self.act_type = nn.FieldType(self.group, act_emb_dim * [self.group.regular_repr])
-        self.out_layer = nn.Linear(self.act_type, 
+        self.out_layer = nn.Linear(self.act_type,
                                    self.getOutFieldType())
         self.enc_a = nn.SequentialModule(
-            nn.Linear(self.getOutFieldType(), self.act_type), 
+            nn.Linear(self.getOutFieldType(), self.act_type),
             nn.ReLU(self.act_type)
         )
 
     def getOutFieldType(self):
+        if self.bimanual:
+            return nn.FieldType(
+                self.group,
+                8 * [self.group.irrep(1)]       # left: xy+rot6d rows, right: xy+rot6d rows
+                + 4 * [self.group.trivial_repr], # left_z, left_grip, right_z, right_grip
+            )
         return nn.FieldType(
             self.group,
             4 * [self.group.irrep(1)] # 8
@@ -37,6 +44,24 @@ class EquiDiffusionUNet(torch.nn.Module):
         )
 
     def getOutput(self, conv_out):
+        if self.bimanual:
+            # layout: [l_xy(2), l_row0(2), l_row1(2), l_row2(2),
+            #          r_xy(2), r_row0(2), r_row1(2), r_row2(2),
+            #          l_z(1), l_g(1), r_z(1), r_g(1)]
+            l_xy = conv_out[:, 0:2]
+            l_r00 = conv_out[:, 2:3];  l_r01 = conv_out[:, 3:4]
+            l_r10 = conv_out[:, 4:5];  l_r11 = conv_out[:, 5:6]
+            l_r20 = conv_out[:, 6:7];  l_r21 = conv_out[:, 7:8]
+            r_xy  = conv_out[:, 8:10]
+            r_r00 = conv_out[:, 10:11]; r_r01 = conv_out[:, 11:12]
+            r_r10 = conv_out[:, 12:13]; r_r11 = conv_out[:, 13:14]
+            r_r20 = conv_out[:, 14:15]; r_r21 = conv_out[:, 15:16]
+            l_z = conv_out[:, 16:17]; l_g = conv_out[:, 17:18]
+            r_z = conv_out[:, 18:19]; r_g = conv_out[:, 19:20]
+            l_rot6d = torch.cat([l_r00, l_r10, l_r20, l_r01, l_r11, l_r21], dim=1)
+            r_rot6d = torch.cat([r_r00, r_r10, r_r20, r_r01, r_r11, r_r21], dim=1)
+            return torch.cat([l_xy, l_z, l_rot6d, l_g, r_xy, r_z, r_rot6d, r_g], dim=1)
+
         xy = conv_out[:, 0:2]
         cos1 = conv_out[:, 2:3]
         sin1 = conv_out[:, 3:4]
@@ -49,9 +74,31 @@ class EquiDiffusionUNet(torch.nn.Module):
 
         action = torch.cat((xy, z, cos1, cos2, cos3, sin1, sin2, sin3, g), dim=1)
         return action
-    
+
     def getActionGeometricTensor(self, act):
         batch_size = act.shape[0]
+        if self.bimanual:
+            # act: [l_pos3, l_rot6d, l_grip, r_pos3, r_rot6d, r_grip] = 20D
+            l_xy  = act[:, 0:2];  l_z = act[:, 2:3]
+            l_rot = act[:, 3:9];  l_g = act[:, 9:10]
+            r_xy  = act[:, 10:12]; r_z = act[:, 12:13]
+            r_rot = act[:, 13:19]; r_g = act[:, 19:20]
+            cat = torch.cat(
+                (
+                    l_xy,
+                    l_rot[:, 0:1], l_rot[:, 3:4],  # l_r00, l_r01
+                    l_rot[:, 1:2], l_rot[:, 4:5],  # l_r10, l_r11
+                    l_rot[:, 2:3], l_rot[:, 5:6],  # l_r20, l_r21
+                    r_xy,
+                    r_rot[:, 0:1], r_rot[:, 3:4],
+                    r_rot[:, 1:2], r_rot[:, 4:5],
+                    r_rot[:, 2:3], r_rot[:, 5:6],
+                    l_z, l_g, r_z, r_g,
+                ),
+                dim=1,
+            )
+            return nn.GeometricTensor(cat, self.getOutFieldType())
+
         xy = act[:, 0:2]
         z = act[:, 2:3]
         rot = act[:, 3:9]

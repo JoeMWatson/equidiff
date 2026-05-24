@@ -75,7 +75,8 @@ class RobomimicReplayImageDataset(BaseImageDataset):
                                 store=zip_store
                             )
                     except Exception as e:
-                        shutil.rmtree(cache_zarr_path)
+                        if os.path.exists(cache_zarr_path):
+                            shutil.rmtree(cache_zarr_path)
                         raise e
                 else:
                     print('Loading cached ReplayBuffer from Disk.')

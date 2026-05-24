@@ -8,6 +8,7 @@ if __name__ == "__main__":
     os.chdir(ROOT_DIR)
 
 import os
+import time
 import hydra
 import torch
 from omegaconf import OmegaConf
@@ -109,11 +110,12 @@ class TrainEquiWorkspace(BaseWorkspace):
                 model=self.ema_model)
 
         # configure env
-        env_runner: BaseImageRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
-        assert isinstance(env_runner, BaseImageRunner)
+        env_runner: BaseImageRunner = None
+        if cfg.training.rollout_every is not None:
+            env_runner = hydra.utils.instantiate(
+                cfg.task.env_runner,
+                output_dir=self.output_dir)
+            assert isinstance(env_runner, BaseImageRunner)
 
         # configure logging
         wandb_run = wandb.init(
@@ -151,6 +153,7 @@ class TrainEquiWorkspace(BaseWorkspace):
             cfg.training.checkpoint_every = 1
             cfg.training.val_every = 1
             cfg.training.sample_every = 1
+            cfg.training.log_every = 1
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -196,22 +199,19 @@ class TrainEquiWorkspace(BaseWorkspace):
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
-                            # wandb_run.log(step_log, step=self.global_step)
-                            # json_logger.log(step_log)
+                            if self.global_step % cfg.training.log_every == 0:
+                                wandb_run.log(step_log, step=self.global_step)
+                                json_logger.log(step_log)
                             self.global_step += 1
 
                         if (cfg.training.max_train_steps is not None) \
                             and batch_idx >= (cfg.training.max_train_steps-1):
                             break
 
-                        break
-
                 # at the end of each epoch
                 # replace train_loss with epoch average
                 train_loss = np.mean(train_losses)
                 step_log['train_loss'] = train_loss
-
-                print("running eval")
 
                 # ========= eval for this epoch ==========
                 policy = self.model
@@ -219,21 +219,21 @@ class TrainEquiWorkspace(BaseWorkspace):
                     policy = self.ema_model
                 policy.eval()
 
-                print("running rollout")
-
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
+                if env_runner is not None and (self.epoch % cfg.training.rollout_every) == 0:
+                    print("running rollout")
+                    t0 = time.time()
                     runner_log = env_runner.run(policy)
-                    # log all
                     step_log.update(runner_log)
-
-                print("running validation")
+                    step_log['time_rollout'] = time.time() - t0
 
                 # run validation
                 if (self.epoch % cfg.training.val_every) == 0:
+                    print("running validation")
+                    t0 = time.time()
                     with torch.no_grad():
                         val_losses = list()
-                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
@@ -244,34 +244,28 @@ class TrainEquiWorkspace(BaseWorkspace):
                                     break
                         if len(val_losses) > 0:
                             val_loss = torch.mean(torch.tensor(val_losses)).item()
-                            # log epoch average validation loss
                             step_log['val_loss'] = val_loss
-
-                print("running diffusion")
+                    step_log['time_val'] = time.time() - t0
 
                 # run diffusion sampling on a training batch
                 if (self.epoch % cfg.training.sample_every) == 0:
+                    print("running diffusion sampling")
+                    t0 = time.time()
                     with torch.no_grad():
-                        # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
                         obs_dict = batch['obs']
                         gt_action = batch['action']
-                        
                         result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                         step_log['train_action_mse_error'] = mse.item()
-                        del batch
-                        del obs_dict
-                        del gt_action
-                        del result
-                        del pred_action
-                        del mse
-
-                print("running checkpoint")
+                        del batch, obs_dict, gt_action, result, pred_action, mse
+                    step_log['time_diffusion'] = time.time() - t0
 
                 # checkpoint
                 if (self.epoch % cfg.training.checkpoint_every) == 0:
+                    print("running checkpoint")
+                    t0 = time.time()
                     # checkpointing
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint()
@@ -291,6 +285,7 @@ class TrainEquiWorkspace(BaseWorkspace):
 
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
+                    step_log['time_checkpoint'] = time.time() - t0
                 # ========= eval end for this epoch ==========
                 policy.train()
 

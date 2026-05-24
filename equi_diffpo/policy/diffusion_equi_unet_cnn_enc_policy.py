@@ -13,7 +13,7 @@ try:
         raise ImportError("CropRandomizer is not in robomimic.models.base_nets")
 except ImportError:
     import robomimic.models.obs_core as rmbn
-from equi_diffpo.model.equi.equi_obs_encoder import EquivariantObsEnc
+from equi_diffpo.model.equi.equi_obs_encoder import EquivariantObsEnc, EquivariantObsEncBimanual
 from equi_diffpo.model.equi.equi_conditional_unet1d import EquiDiffusionUNet
 from equi_diffpo.model.vision.rot_randomizer import RotRandomizer
 
@@ -48,10 +48,12 @@ class DiffusionEquiUNetCNNEncPolicy(BaseImagePolicy):
         action_dim = action_shape[0]
         obs_shape_meta = shape_meta['obs']
         
-        self.enc = EquivariantObsEnc(
-            obs_shape=obs_shape_meta['agentview_image']['shape'], 
-            crop_shape=crop_shape, 
-            n_hidden=enc_n_hidden, 
+        bimanual = 'robot0_left_eef_pos' in obs_shape_meta
+        enc_cls = EquivariantObsEncBimanual if bimanual else EquivariantObsEnc
+        self.enc = enc_cls(
+            obs_shape=obs_shape_meta['agentview_image']['shape'],
+            crop_shape=crop_shape,
+            n_hidden=enc_n_hidden,
             N=N)
         
         obs_feature_dim = enc_n_hidden
@@ -67,6 +69,7 @@ class DiffusionEquiUNetCNNEncPolicy(BaseImagePolicy):
             n_groups=n_groups,
             cond_predict_scale=cond_predict_scale,
             N=N,
+            bimanual=bimanual,
         )
         
         print("Enc params: %e" % sum(p.numel() for p in self.enc.parameters()))

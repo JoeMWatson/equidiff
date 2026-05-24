@@ -16,7 +16,7 @@ class Identity(torch.nn.Module):
 
     def forward(self, x):
         return x
-    
+
 class InHandEncoder(torch.nn.Module):
     def __init__(self, out_size):
         super().__init__()
@@ -56,7 +56,7 @@ class EquivariantObsEnc(ModuleAttrMixin):
             ),
             self.token_type,
         )
-        
+
         self.quaternion_to_sixd = RotationTransformer('quaternion', 'rotation_6d')
 
         self.gTgc = torch.Tensor([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
@@ -69,8 +69,8 @@ class EquivariantObsEnc(ModuleAttrMixin):
 
     def get6DRotation(self, quat):
         # data is in xyzw, but rotation transformer takes wxyz
-        return self.quaternion_to_sixd.forward(quat[:, [3, 0, 1, 2]]) 
-        
+        return self.quaternion_to_sixd.forward(quat[:, [3, 0, 1, 2]])
+
     def forward(self, nobs):
         obs = nobs["agentview_image"]
         ee_pos = nobs["robot0_eef_pos"]
@@ -114,7 +114,7 @@ class EquivariantObsEnc(ModuleAttrMixin):
         features = nn.GeometricTensor(features, self.enc_out.in_type)
         out = self.enc_out(features).tensor
         return rearrange(out, "(b t) d -> b t d", b=batch_size)
-    
+
 class EquivariantObsEncVoxel(ModuleAttrMixin):
     def __init__(
         self,
@@ -161,8 +161,8 @@ class EquivariantObsEncVoxel(ModuleAttrMixin):
         )
 
     def get6DRotation(self, quat):
-        return self.quaternion_to_sixd.forward(quat[:, [3, 0, 1, 2]])    
-    
+        return self.quaternion_to_sixd.forward(quat[:, [3, 0, 1, 2]])
+
     def forward(self, nobs):
         ee_pos = nobs["robot0_eef_pos"]
         ih = nobs["robot0_eye_in_hand_image"]
@@ -205,6 +205,104 @@ class EquivariantObsEncVoxel(ModuleAttrMixin):
                 ee_q,
             ],
             dim=1
+        )
+        features = nn.GeometricTensor(features, self.enc_out.in_type)
+        out = self.enc_out(features).tensor
+        return rearrange(out, "(b t) d -> b t d", b=batch_size)
+
+
+class EquivariantObsEncBimanual(ModuleAttrMixin):
+    """Equivariant encoder for bimanual tasks with left/right arm obs keys."""
+
+    def __init__(
+        self,
+        obs_shape=(3, 84, 84),
+        crop_shape=(76, 76),
+        n_hidden=128,
+        N=8,
+        initialize=True,
+    ):
+        super().__init__()
+        obs_channel = obs_shape[0]
+        self.n_hidden = n_hidden
+        self.N = N
+        self.group = gspaces.no_base_space(CyclicGroup(self.N))
+        self.token_type = nn.FieldType(self.group, self.n_hidden * [self.group.regular_repr])
+        self.enc_obs = EquivariantResEncoder76Cyclic(obs_channel, self.n_hidden, initialize)
+        self.enc_left_ih  = InHandEncoder(self.n_hidden).to(self.device)
+        self.enc_right_ih = InHandEncoder(self.n_hidden).to(self.device)
+        self.enc_out = nn.Linear(
+            nn.FieldType(
+                self.group,
+                n_hidden * [self.group.regular_repr]   # agentview (equivariant)
+                + n_hidden * [self.group.trivial_repr]  # left in-hand
+                + n_hidden * [self.group.trivial_repr]  # right in-hand
+                + 4 * [self.group.irrep(1)]             # left  pos_xy + rot6d
+                + 4 * [self.group.irrep(1)]             # right pos_xy + rot6d
+                + 4 * [self.group.trivial_repr],        # left_z, left_grip, right_z, right_grip
+            ),
+            self.token_type,
+        )
+        self.quaternion_to_sixd = RotationTransformer('quaternion', 'rotation_6d')
+        self.crop_randomizer = dmvc.CropRandomizer(
+            input_shape=obs_shape,
+            crop_height=crop_shape[0],
+            crop_width=crop_shape[1],
+        )
+
+    def get6DRotation(self, quat):
+        # data is wxyz; rotation_transformer (pytorch3d) also expects wxyz
+        return self.quaternion_to_sixd.forward(quat)
+
+    def forward(self, nobs):
+        obs        = nobs["agentview_image"]
+        left_ih    = nobs["robot0_left_eye_in_hand_image"]
+        right_ih   = nobs["robot0_right_eye_in_hand_image"]
+        left_pos   = nobs["robot0_left_eef_pos"]
+        left_quat  = nobs["robot0_left_eef_quat"]
+        right_pos  = nobs["robot0_right_eef_pos"]
+        right_quat = nobs["robot0_right_eef_quat"]
+        ee_q       = nobs["robot0_gripper_qpos"]   # (B, T, 2)
+
+        batch_size = obs.shape[0]
+        t = obs.shape[1]
+
+        obs        = rearrange(obs,        "b t c h w -> (b t) c h w")
+        left_ih    = rearrange(left_ih,    "b t c h w -> (b t) c h w")
+        right_ih   = rearrange(right_ih,   "b t c h w -> (b t) c h w")
+        left_pos   = rearrange(left_pos,   "b t d -> (b t) d")
+        left_quat  = rearrange(left_quat,  "b t d -> (b t) d")
+        right_pos  = rearrange(right_pos,  "b t d -> (b t) d")
+        right_quat = rearrange(right_quat, "b t d -> (b t) d")
+        ee_q       = rearrange(ee_q,       "b t d -> (b t) d")
+
+        obs = self.crop_randomizer(obs)
+
+        left_rot  = self.get6DRotation(left_quat)
+        right_rot = self.get6DRotation(right_quat)
+
+        enc_out      = self.enc_obs(obs).tensor.reshape(batch_size * t, -1)
+        left_ih_out  = self.enc_left_ih(left_ih)
+        right_ih_out = self.enc_right_ih(right_ih)
+
+        def rot6d_irreps(rot):
+            return [rot[:, 0:1], rot[:, 3:4], rot[:, 1:2], rot[:, 4:5], rot[:, 2:3], rot[:, 5:6]]
+
+        features = torch.cat(
+            [
+                enc_out,
+                left_ih_out,
+                right_ih_out,
+                left_pos[:, 0:2],
+                *rot6d_irreps(left_rot),
+                right_pos[:, 0:2],
+                *rot6d_irreps(right_rot),
+                left_pos[:, 2:3],
+                ee_q[:, 0:1],
+                right_pos[:, 2:3],
+                ee_q[:, 1:2],
+            ],
+            dim=1,
         )
         features = nn.GeometricTensor(features, self.enc_out.in_type)
         out = self.enc_out(features).tensor

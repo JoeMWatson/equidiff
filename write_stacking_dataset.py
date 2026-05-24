@@ -130,7 +130,7 @@ def mp4_to_frames(video_path: str) -> np.ndarray:
 #  REPLACE THIS FUNCTION WITH YOUR REAL DATA SOURCE
 # ─────────────────────────────────────────────────────────────────────────────
 
-DATA_PATH = "/home/joe/Research/code/data/stacking1031"
+DATA_PATH = "/home/joe/Research/code/data/stacking_easy_1044"
 
 def collect_trajectory(demo_idx: int) -> dict:
     """
@@ -179,20 +179,20 @@ def collect_trajectory(demo_idx: int) -> dict:
         action_left_pos, action_left_ori, action_left_gripper, action_right_pos, action_right_ori, action_right_gripper
     ), axis=1)
 
-    left_eye_in_hand = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_left.mp4"))
-    right_eye_in_hand = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_right.mp4"))
-    agent_view = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_overhead.mp4"))
+    left_eye_in_hand = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_left.mp4"))[:-1]
+    right_eye_in_hand = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_right.mp4"))[:-1]
+    agent_view = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_overhead.mp4"))[:-1]
     # 7 and 15 are grippers
-    left_pos = np.concatenate([data[f"robot_state_{i}"][:, None] for i in range(0, 7)], axis=1)
-    right_pos = np.concatenate([data[f"robot_state_{i}"][:, None] for i in range(8, 15)], axis=1)
-    left_vel = np.concatenate([data[f"robot_state_{i}"][:, None] for i in range(16, 23)], axis=1)
-    right_vel = np.concatenate([data[f"robot_state_{i}"][:, None] for i in range(23, 30)], axis=1)
-    gripper = np.concatenate([data[f"robot_state_{i}"][:, None] for i in [7, 15]], axis=1)
+    left_pos = np.concatenate([data[f"robot_state_{i}"][:-1, None] for i in range(0, 7)], axis=1)
+    right_pos = np.concatenate([data[f"robot_state_{i}"][:-1, None] for i in range(8, 15)], axis=1)
+    left_vel = np.concatenate([data[f"robot_state_{i}"][:-1, None] for i in range(16, 23)], axis=1)
+    right_vel = np.concatenate([data[f"robot_state_{i}"][:-1, None] for i in range(23, 30)], axis=1)
+    gripper = np.concatenate([data[f"robot_state_{i}"][:-1, None] for i in [7, 15]], axis=1)
     traj = {
         "actions":                 actions,
         "obs_agentview":           agent_view,
-        "obs_left_eye_in_hand":    right_eye_in_hand,
-        "obs_right_eye_in_hand":   left_eye_in_hand,
+        "obs_left_eye_in_hand":    left_eye_in_hand,
+        "obs_right_eye_in_hand":   right_eye_in_hand,
         "obs_blue_object":        np.concatenate((data["blue_pos"][:-1, :], data["blue_quat"][:-1, :]), axis=1),
         "obs_orange_object":        np.concatenate((data["orange_pos"][:-1, :], data["black_quat"][:-1, :]), axis=1),
         "obs_black_object":        np.concatenate((data["black_pos"][:-1, :], data["black_quat"][:-1, :]), axis=1),
@@ -294,17 +294,18 @@ def create_dataset(
     with h5py.File(out_path, "w") as f:
         data = f.create_group("data")
 
+        write_idx = 0
         for i in range(n_demos):
             try:
                 traj = collect_trajectory(i)
-                write_demo(data, i, traj, model_xml)
+                write_demo(data, write_idx, traj, model_xml)
+                write_idx += 1
             except FileNotFoundError:
                 print(f"No data for {i}")
-                pass
 
         # ── optional: train/valid split mask ────────────────────────────────
-        n_train = int(n_demos * train_ratio)
-        all_keys = [f"demo_{i}" for i in range(n_demos)]
+        n_train = int(write_idx * train_ratio)
+        all_keys = [f"demo_{i}" for i in range(write_idx)]
         train_keys = all_keys[:n_train]
         valid_keys = all_keys[n_train:]
 

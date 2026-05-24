@@ -1,4 +1,5 @@
 import os
+import time
 import wandb
 import numpy as np
 import torch
@@ -8,6 +9,7 @@ import tqdm
 import h5py
 import math
 import dill
+import cv2
 import gymnasium
 import wandb.sdk.data_types.video as wv
 from equi_diffpo.gym_util.multistep_wrapper import MultiStepWrapper
@@ -18,7 +20,6 @@ from equi_diffpo.policy.base_image_policy import BaseImagePolicy
 from equi_diffpo.common.pytorch_util import dict_apply
 from equi_diffpo.env_runner.base_image_runner import BaseImageRunner
 
-from equi_diffpo.env_runner.bimanual_env import ThreeCubesEnvironment  # noqa: F401
 
 
 class BimanualImageRunner(BaseImageRunner):
@@ -67,24 +68,22 @@ class BimanualImageRunner(BaseImageRunner):
         if abs_action:
             rotation_transformer = RotationTransformer('axis_angle', 'rotation_6d')
 
-        # ------------------------------------------------------------------
-        # TODO: implement a gym-compatible wrapper for bimanual_suite and
-        # replace the NotImplementedError below with real env construction.
-        #
-        # The wrapper must expose:
-        #   - observation_space / action_space (gym.spaces)
-        #   - reset() -> obs_dict   (keys matching shape_meta['obs'])
-        #   - step(action) -> (obs_dict, reward, done, info)
-        #     where action is (14,) float32 in axis-angle convention
-        #   - seed(seed)
-        #   - render() -> np.ndarray  (H, W, 3) uint8
+        steps_per_render = max(20 // fps, 1)
 
         def env_fn():
+          from equi_diffpo.env_runner.bimanual_env import ThreeCubesEnvironment
           env = ThreeCubesEnvironment(seed=0)
           return MultiStepWrapper(
               VideoRecordingWrapper(
                   env,
-                  video_recoder=VideoRecorder.create_h264(...),
+                  video_recoder=VideoRecorder.create_h264(
+                      fps=fps,
+                      codec='h264',
+                      input_pix_fmt='rgb24',
+                      crf=crf,
+                      thread_type='FRAME',
+                      thread_count=1,
+                  ),
                   file_path=None,
                   steps_per_render=steps_per_render,
               ),
@@ -100,29 +99,25 @@ class BimanualImageRunner(BaseImageRunner):
         env_prefixs = []
         env_init_fn_dills = []
 
-        # train rollouts – replay initial states from the dataset
-        with h5py.File(dataset_path, 'r') as f:
-            for i in range(n_train):
-                train_idx = train_start_idx + i
-                enable_render = i < n_train_vis
-                init_state = f[f'data/demo_{train_idx}/states'][0]
+        # train rollouts – use demo index as seed
+        for i in range(n_train):
+            train_idx = train_start_idx + i
+            enable_render = i < n_train_vis
 
-                def init_fn(env, init_state=init_state,
-                        enable_render=enable_render):
-                    assert isinstance(env.env, VideoRecordingWrapper)
-                    env.env.video_recoder.stop()
-                    env.env.file_path = None
-                    if enable_render:
-                        filename = pathlib.Path(output_dir).joinpath(
-                            'media', wv.util.generate_id() + ".mp4")
-                        filename.parent.mkdir(parents=False, exist_ok=True)
-                        env.env.file_path = str(filename)
-                    # TODO: adapt init_state reset for bimanual_suite wrapper
-                    env.env.env.init_state = init_state
+            def init_fn(env, seed=train_idx, enable_render=enable_render):
+                assert isinstance(env.env, VideoRecordingWrapper)
+                env.env.video_recoder.stop()
+                env.env.file_path = None
+                if enable_render:
+                    filename = pathlib.Path(output_dir).joinpath(
+                        'media', wv.util.generate_id() + ".mp4")
+                    filename.parent.mkdir(parents=False, exist_ok=True)
+                    env.env.file_path = str(filename)
+                env.seed(seed)
 
-                env_seeds.append(train_idx)
-                env_prefixs.append('train/')
-                env_init_fn_dills.append(dill.dumps(init_fn))
+            env_seeds.append(train_idx)
+            env_prefixs.append('train/')
+            env_init_fn_dills.append(dill.dumps(init_fn))
 
         # test rollouts – random seeds
         for i in range(n_test):
@@ -202,8 +197,9 @@ class BimanualImageRunner(BaseImageRunner):
                 mininterval=self.tqdm_interval_sec,
             )
             done = False
+            t_chunk_start = time.time()
             while not done:
-                np_obs_dict = dict(obs)
+                np_obs_dict = self._env_obs_to_policy_obs(obs)
                 if self.past_action and (past_action is not None):
                     np_obs_dict['past_action'] = past_action[
                         :, -(self.n_obs_steps - 1):].astype(np.float32)
@@ -230,6 +226,7 @@ class BimanualImageRunner(BaseImageRunner):
                 past_action = action
                 pbar.update(action.shape[1])
             pbar.close()
+            print(f"Eval chunk {chunk_idx+1}/{n_chunks} done in {time.time()-t_chunk_start:.1f}s")
 
             all_video_paths[this_global_slice] = env.render()[this_local_slice]
             all_rewards[this_global_slice] = env.call('get_attr', 'reward')[this_local_slice]
@@ -257,6 +254,35 @@ class BimanualImageRunner(BaseImageRunner):
             log_data[prefix + 'max_score'] = self.max_rewards[prefix]
 
         return log_data
+
+    def _env_obs_to_policy_obs(self, env_obs: dict) -> dict:
+        """
+        Convert raw env observations to the format expected by the policy.
+        env_obs values: (n_envs, n_obs_steps, ...)
+        """
+        def resize_image(imgs):
+            # imgs: (B, T, H, W, 3) uint8 → (B, T, 3, 84, 84) float32
+            B, T, H, W, C = imgs.shape
+            out = np.empty((B, T, 84, 84, 3), dtype=np.float32)
+            for b in range(B):
+                for t in range(T):
+                    out[b, t] = cv2.resize(imgs[b, t], (84, 84), interpolation=cv2.INTER_AREA)
+            out /= 255.0
+            return np.moveaxis(out, -1, 2)  # (B, T, 3, 84, 84)
+
+        return {
+            'agentview_image':               resize_image(env_obs['overhead_camera']),
+            'robot0_left_eye_in_hand_image': resize_image(env_obs['left_camera']),
+            'robot0_right_eye_in_hand_image':resize_image(env_obs['right_camera']),
+            'robot0_left_eef_pos':           env_obs['left_ee_pos'].astype(np.float32),
+            'robot0_left_eef_quat':          env_obs['left_ee_quat'].astype(np.float32),
+            'robot0_right_eef_pos':          env_obs['right_ee_pos'].astype(np.float32),
+            'robot0_right_eef_quat':         env_obs['right_ee_quat'].astype(np.float32),
+            'robot0_gripper_qpos':           np.stack([
+                env_obs['left_pos'][:, :, 7],
+                env_obs['right_pos'][:, :, 7],
+            ], axis=-1).astype(np.float32),
+        }
 
     def undo_transform_action(self, action):
         """
