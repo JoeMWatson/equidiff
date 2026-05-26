@@ -53,7 +53,7 @@ import cv2
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Image size (must match what your renderer produces)
-IMG_H, IMG_W, IMG_C = 84, 84, 3
+IMG_H, IMG_W, IMG_C = 72, 128, 3
 
 # Action dimensionality  (7 = [eef_pos(3) + eef_rot(3) + gripper(1)])
 ACTION_DIM = 7
@@ -90,49 +90,22 @@ def load_model_xml(reference_hdf5_path: str) -> str:
     return xml
     
 def mp4_to_frames(video_path: str) -> np.ndarray:
-    """
-    Read an MP4 file and return all frames scaled to (84, 84, 3) as uint8.
-
-    Args:
-        video_path: Path to the .mp4 file.
-
-    Returns:
-        np.ndarray of shape (N, 84, 84, 3), dtype=uint8, values in [0, 255].
-    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Could not open video file: {video_path}")
-
     frames = []
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
-        # cv2 reads BGR → convert to RGB
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # Resize to (IMG_W, IMG_H) — note cv2 takes (width, height)
-        frame_resized = cv2.resize(frame_rgb, (IMG_W, IMG_H), interpolation=cv2.INTER_AREA)
-
-        frames.append(frame_resized)
-
+        frames.append(cv2.cvtColor(cv2.resize(frame, (IMG_W, IMG_H), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB))
     cap.release()
-
     if not frames:
         raise ValueError(f"No frames extracted from: {video_path}")
-
-    # Stack into (N, 84, 84, 3), ensure uint8
     return np.stack(frames, axis=0).astype(np.uint8)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  REPLACE THIS FUNCTION WITH YOUR REAL DATA SOURCE
-# ─────────────────────────────────────────────────────────────────────────────
-
-DATA_PATH = "/home/joe/Research/code/data/stacking_easy_1044"
-
-def collect_trajectory(demo_idx: int) -> dict:
+def collect_trajectory(path: str, demo_idx: int) -> dict:
     """
     Return one trajectory as a dict of numpy arrays.
 
@@ -164,7 +137,7 @@ def collect_trajectory(demo_idx: int) -> dict:
         dones                np.ndarray  (T,)            int64
         states               np.ndarray  (T, 58)         float64
     """
-    data_path = pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}.npz"
+    data_path = pathlib.Path(path) / f"stacking_{demo_idx}.npz"
     data = np.load(data_path)
     n = data["timesteps"].shape[0] - 1
 
@@ -179,9 +152,9 @@ def collect_trajectory(demo_idx: int) -> dict:
         action_left_pos, action_left_ori, action_left_gripper, action_right_pos, action_right_ori, action_right_gripper
     ), axis=1)
 
-    left_eye_in_hand = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_left.mp4"))[:-1]
-    right_eye_in_hand = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_right.mp4"))[:-1]
-    agent_view = mp4_to_frames(str(pathlib.Path(DATA_PATH) / f"stacking_{demo_idx}_overhead.mp4"))[:-1]
+    agent_view     = mp4_to_frames(str(pathlib.Path(path) / f"stacking_{demo_idx}_overhead.mp4"))[:-1]
+    left_eye_in_hand  = mp4_to_frames(str(pathlib.Path(path) / f"stacking_{demo_idx}_left.mp4"))[:-1]
+    right_eye_in_hand = mp4_to_frames(str(pathlib.Path(path) / f"stacking_{demo_idx}_right.mp4"))[:-1]
     # 7 and 15 are grippers
     left_pos = np.concatenate([data[f"robot_state_{i}"][:-1, None] for i in range(0, 7)], axis=1)
     right_pos = np.concatenate([data[f"robot_state_{i}"][:-1, None] for i in range(8, 15)], axis=1)
@@ -229,7 +202,7 @@ def collect_trajectory(demo_idx: int) -> dict:
 #  WRITER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def write_demo(data_group: h5py.Group, demo_idx: int, traj: dict, model_xml: str):
+def write_demo(data_group: h5py.Group, demo_idx: int, traj: dict, model_xml: str, seed: int = 0):
     """Write one trajectory into the HDF5 data group."""
     demo_key = f"demo_{demo_idx}"
     grp = data_group.create_group(demo_key)
@@ -271,11 +244,13 @@ def write_demo(data_group: h5py.Group, demo_idx: int, traj: dict, model_xml: str
     # ── per-demo attributes (robomimic reads these) ───────────────────────────
     grp.attrs["model_file"]  = model_xml
     grp.attrs["num_samples"] = T
+    grp.attrs["seed"]        = seed
 
     print(f"  wrote {demo_key}  T={T}")
 
 
 def create_dataset(
+    data_path: str,
     out_path:          str,
     n_demos:           int,
     # reference_hdf5:    str | None,
@@ -297,8 +272,8 @@ def create_dataset(
         write_idx = 0
         for i in range(n_demos):
             try:
-                traj = collect_trajectory(i)
-                write_demo(data, write_idx, traj, model_xml)
+                traj = collect_trajectory(data_path, i)
+                write_demo(data, write_idx, traj, model_xml, seed=i)
                 write_idx += 1
             except FileNotFoundError:
                 print(f"No data for {i}")
@@ -342,6 +317,8 @@ def create_dataset(
 
 def main():
     parser = argparse.ArgumentParser(description="Create a robomimic HDF5 dataset.")
+    parser.add_argument("path",
+                        help="Path to data")
     parser.add_argument("--out",        default="my_dataset.hdf5",
                         help="Output HDF5 path (default: my_dataset.hdf5)")
     # parser.add_argument("--model_file", default=None,
@@ -353,6 +330,7 @@ def main():
     args = parser.parse_args()
 
     create_dataset(
+        data_path = args.path,
         out_path       = args.out,
         n_demos        = args.n_demos,
         # reference_hdf5 = args.model_file,

@@ -261,14 +261,14 @@ class BimanualImageRunner(BaseImageRunner):
         env_obs values: (n_envs, n_obs_steps, ...)
         """
         def resize_image(imgs):
-            # imgs: (B, T, H, W, 3) uint8 → (B, T, 3, 84, 84) float32
+            # imgs: (B, T, H, W, 3) uint8 → (B, T, 3, 72, 128) float32
             B, T, H, W, C = imgs.shape
-            out = np.empty((B, T, 84, 84, 3), dtype=np.float32)
+            out = np.empty((B, T, 72, 128, 3), dtype=np.float32)
             for b in range(B):
                 for t in range(T):
-                    out[b, t] = cv2.resize(imgs[b, t], (84, 84), interpolation=cv2.INTER_AREA)
+                    out[b, t] = cv2.resize(imgs[b, t], (128, 72), interpolation=cv2.INTER_AREA)
             out /= 255.0
-            return np.moveaxis(out, -1, 2)  # (B, T, 3, 84, 84)
+            return np.moveaxis(out, -1, 2)  # (B, T, 3, 72, 128)
 
         return {
             'agentview_image':               resize_image(env_obs['overhead_camera']),
